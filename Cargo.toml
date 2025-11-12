@@ -1,0 +1,39 @@
+[package]
+name = "jamhash"
+version = "0.1.0"
+edition = "2024"
+authors = ["Sebastian Beyvers"]
+description = "A fast, simple hash function with dual-path accumulation"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/yourusername/jamhash"
+keywords = ["hash", "hashing", "hasher", "kmer"]
+categories = ["algorithms", "no-std"]
+
+[dependencies]
+
+[dev-dependencies]
+criterion = { version = "0.7.0", features = ["html_reports"] }
+murmurhash3 = { version = "0.0.5" }
+fastmurmur3 = "0.2.0"
+xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
+roaring = "0.11.2"
+rand = "0.9.2"
+foldhash = "0.2.0"
+
+[lib]
+name = "jamhash"
+path = "src/lib.rs"
+
+[[example]]
+name = "basic"
+path = "examples/basic.rs"
+
+[[bench]]
+name = "benchmarks"
+harness = false
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
