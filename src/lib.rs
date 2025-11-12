@@ -93,18 +93,10 @@ pub fn jamhash_u64(kmer: u64) -> u64 {
     fold_multiply(fold1, fold2)
 }
 
-/// Streaming hasher with dual-path accumulation.
+/// Streaming hasher using jamhash_u64 for chunk processing.
 ///
-/// Maintains two independent state paths that are combined at finalization.
-/// The dual-path design mirrors the structure of `jamhash_u64` while supporting
-/// arbitrary-length byte sequences through buffering and incremental processing.
-///
-/// # Algorithm
-///
-/// - Buffers incoming bytes until complete u64 chunks are available
-/// - Each u64 chunk updates both state paths independently
-/// - Partial buffers (< 8 bytes) are XORed with their length before processing
-/// - Final hash combines both states via folded multiplication
+/// Processes incoming bytes by hashing 8-byte chunks with `jamhash_u64`
+/// and XORing the results. Buffers partial chunks across multiple writes.
 ///
 /// # Examples
 ///
@@ -117,11 +109,9 @@ pub fn jamhash_u64(kmer: u64) -> u64 {
 /// let hash = hasher.finish();
 /// ```
 pub struct JamHasher {
-    state1: u64,
-    state2: u64,
+    accumulator: u64,
     buffer: [u8; 8],
     buffer_len: usize,
-    processed_bytes: usize,
 }
 
 impl JamHasher {
@@ -140,35 +130,9 @@ impl JamHasher {
     #[inline]
     pub fn new() -> Self {
         Self {
-            state1: 0,
-            state2: 0,
+            accumulator: 0,
             buffer: [0u8; 8],
             buffer_len: 0,
-            processed_bytes: 0,
-        }
-    }
-
-    /// Process a complete u64 chunk through both state paths
-    #[inline]
-    fn process_chunk(&mut self, chunk: u64) {
-        self.state1 = fold_multiply(self.state1 ^ chunk.rotate_left(16), CONST1);
-        self.state2 = fold_multiply(self.state2 ^ chunk.rotate_left(48), CONST2);
-    }
-
-    /// Process any remaining bytes in the buffer
-    #[inline]
-    fn process_remaining(&mut self) {
-        if self.buffer_len > 0 {
-            // Convert partial buffer to u64 (little-endian, zero-padded)
-            let mut chunk = 0u64;
-            for i in 0..self.buffer_len {
-                chunk |= (self.buffer[i] as u64) << (i * 8);
-            }
-
-            // XOR with the partial buffer length to distinguish different lengths
-            chunk ^= self.buffer_len as u64;
-
-            self.process_chunk(chunk);
         }
     }
 }
@@ -182,54 +146,68 @@ impl Default for JamHasher {
 impl Hasher for JamHasher {
     #[inline]
     fn write(&mut self, bytes: &[u8]) {
-        let mut remaining = bytes;
+        let len = bytes.len();
+        if len == 0 {
+            return;
+        }
 
-        // If we have bytes in the buffer, try to complete it first
+        let mut offset = 0;
+
+        // If we have buffered bytes, try to complete an 8-byte chunk first
         if self.buffer_len > 0 {
             let needed = 8 - self.buffer_len;
-            let to_copy = remaining.len().min(needed);
+            let available = len.min(needed);
 
-            self.buffer[self.buffer_len..self.buffer_len + to_copy]
-                .copy_from_slice(&remaining[..to_copy]);
-            self.buffer_len += to_copy;
-            remaining = &remaining[to_copy..];
+            self.buffer[self.buffer_len..self.buffer_len + available]
+                .copy_from_slice(&bytes[..available]);
+            self.buffer_len += available;
+            offset = available;
 
-            // If buffer is now full, process it
+            // If we completed a chunk, process it
             if self.buffer_len == 8 {
                 let chunk = u64::from_le_bytes(self.buffer);
-                self.process_chunk(chunk);
+                self.accumulator ^= jamhash_u64(chunk);
                 self.buffer_len = 0;
-                self.processed_bytes += 8;
+            } else {
+                // Buffer not full yet, we're done
+                return;
             }
         }
 
-        // Process complete u64 chunks
-        while remaining.len() >= 8 {
-            let chunk = u64::from_le_bytes(remaining[..8].try_into().unwrap());
-            self.process_chunk(chunk);
-            remaining = &remaining[8..];
-            self.processed_bytes += 8;
+        // Process all complete 8-byte chunks with unaligned reads
+        while offset + 8 <= len {
+            // SAFETY: We checked that offset + 8 <= len
+            let chunk = unsafe {
+                bytes.as_ptr().add(offset).cast::<u64>().read_unaligned()
+            };
+            self.accumulator ^= jamhash_u64(chunk);
+            offset += 8;
         }
 
-        // Buffer any remaining bytes
-        if !remaining.is_empty() {
-            self.buffer[..remaining.len()].copy_from_slice(remaining);
-            self.buffer_len = remaining.len();
+        // Buffer any remaining bytes (< 8)
+        let remaining = len - offset;
+        if remaining > 0 {
+            self.buffer[..remaining].copy_from_slice(&bytes[offset..]);
+            self.buffer_len = remaining;
         }
     }
 
     #[inline]
     fn finish(&self) -> u64 {
-        let mut hasher = Self {
-            state1: self.state1,
-            state2: self.state2,
-            buffer: self.buffer,
-            buffer_len: self.buffer_len,
-            processed_bytes: self.processed_bytes,
-        };
+        let mut result = self.accumulator;
 
-        hasher.process_remaining();
-        fold_multiply(hasher.state1, hasher.state2)
+        // Process any remaining buffered bytes
+        if self.buffer_len > 0 {
+            let mut chunk = 0u64;
+            for i in 0..self.buffer_len {
+                chunk |= (self.buffer[i] as u64) << (i * 8);
+            }
+            // XOR with length to distinguish different partial chunks
+            chunk ^= self.buffer_len as u64;
+            result ^= jamhash_u64(chunk);
+        }
+
+        result
     }
 }
 
