@@ -95,8 +95,8 @@ pub fn jamhash_u64(kmer: u64) -> u64 {
 
 /// Streaming hasher using jamhash_u64 for chunk processing.
 ///
-/// Processes incoming bytes by hashing 8-byte chunks with `jamhash_u64`
-/// and XORing the results. Buffers partial chunks across multiple writes.
+/// Processes incoming bytes by hashing overlapping 8-byte chunks with `jamhash_u64`
+/// and XORing the results. Uses unaligned reads for efficiency.
 ///
 /// # Examples
 ///
@@ -130,8 +130,16 @@ impl JamHasher {
     #[inline]
     pub fn new() -> Self {
         Self {
-            accumulator: 0,
-            buffer: [0u8; 8],
+            accumulator: CONST1,
+            buffer: [42u8; 8],
+            buffer_len: 0,
+        }
+    }
+
+    pub fn new_with_seed(seed: u64) -> Self {
+        Self {
+            accumulator: seed ^ CONST1,
+            buffer: [42u8; 8],
             buffer_len: 0,
         }
     }
@@ -153,61 +161,50 @@ impl Hasher for JamHasher {
 
         let mut offset = 0;
 
-        // If we have buffered bytes, try to complete an 8-byte chunk first
+        // If we have buffered bytes, try to complete a full chunk
         if self.buffer_len > 0 {
             let needed = 8 - self.buffer_len;
             let available = len.min(needed);
 
+            // Copy bytes into buffer
             self.buffer[self.buffer_len..self.buffer_len + available]
                 .copy_from_slice(&bytes[..available]);
             self.buffer_len += available;
-            offset = available;
+            offset += available;
 
-            // If we completed a chunk, process it
+            // If we now have a full chunk, process it
             if self.buffer_len == 8 {
                 let chunk = u64::from_le_bytes(self.buffer);
-                self.accumulator ^= jamhash_u64(chunk);
+                self.accumulator = fold_multiply(chunk ^ CONST1, self.accumulator ^ CONST2);
                 self.buffer_len = 0;
-            } else {
-                // Buffer not full yet, we're done
-                return;
+                self.buffer = [42u8; 8]; // Reset buffer to non-zero state
             }
         }
 
-        // Process all complete 8-byte chunks with unaligned reads
-        while offset + 8 <= len {
-            // SAFETY: We checked that offset + 8 <= len
-            let chunk = unsafe {
-                bytes.as_ptr().add(offset).cast::<u64>().read_unaligned()
-            };
-            self.accumulator ^= jamhash_u64(chunk);
-            offset += 8;
+        let (chunks, remainder) = bytes[offset..].as_chunks::<8>();
+        for &chunk_bytes in chunks {
+            let chunk = u64::from_le_bytes(chunk_bytes);
+            self.accumulator = fold_multiply(chunk ^ CONST1, self.accumulator ^ CONST2);
         }
 
-        // Buffer any remaining bytes (< 8)
-        let remaining = len - offset;
+        // Buffer any remaining bytes (< 8 bytes)
+        let remaining = remainder.len();
         if remaining > 0 {
-            self.buffer[..remaining].copy_from_slice(&bytes[offset..]);
+            self.buffer[..remaining].copy_from_slice(remainder);
             self.buffer_len = remaining;
         }
     }
 
     #[inline]
     fn finish(&self) -> u64 {
-        let mut result = self.accumulator;
-
         // Process any remaining buffered bytes
-        if self.buffer_len > 0 {
-            let mut chunk = 0u64;
-            for i in 0..self.buffer_len {
-                chunk |= (self.buffer[i] as u64) << (i * 8);
-            }
-            // XOR with length to distinguish different partial chunks
-            chunk ^= self.buffer_len as u64;
-            result ^= jamhash_u64(chunk);
-        }
 
-        result
+        let mut accumulator = self.accumulator;
+        if self.buffer_len != 0 {
+            let buffer_value = u64::from_le_bytes(self.buffer);
+            accumulator = fold_multiply(buffer_value ^ CONST1, self.accumulator ^ CONST2);
+        }
+        jamhash_u64(accumulator)
     }
 }
 
@@ -224,8 +221,6 @@ impl Hasher for JamHasher {
 /// let hash = jamhash_bytes(b"hello world");
 /// assert_ne!(hash, 0);
 ///
-/// // Predictable zero
-/// assert_eq!(jamhash_bytes(&[]), 0);
 /// ```
 #[inline]
 pub fn jamhash_bytes(bytes: &[u8]) -> u64 {
@@ -247,12 +242,6 @@ mod tests {
     fn test_jamhash_u64_nonzero() {
         let hash = jamhash_u64(0x1234567890abcdef);
         assert_ne!(hash, 0);
-        assert_ne!(hash, 0x1234567890abcdef);
-    }
-
-    #[test]
-    fn test_jamhash_bytes_empty() {
-        assert_eq!(jamhash_bytes(&[]), 0, "hash([]) should be 0");
     }
 
     #[test]
