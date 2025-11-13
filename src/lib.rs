@@ -98,49 +98,29 @@ pub fn jamhash_u64(kmer: u64) -> u64 {
 /// Processes incoming bytes by hashing 8-byte chunks in parallel across 8 independent
 /// accumulators, then merging them in the finalization step.
 pub struct JamHasher {
-    accumulators: [u64; 8],
+    accumulator: u64,
     buffer: [u8; 8],
     buffer_len: usize,
-    chunk_count: u64, // Track total chunks processed for accumulator selection
+    total_bytes: u64,
 }
 
 impl JamHasher {
     #[inline]
     pub fn new() -> Self {
         Self {
-            // Initialize each accumulator with a different seed for better mixing
-            accumulators: [
-                CONST1,
-                CONST1.rotate_left(8),
-                CONST1.rotate_left(16),
-                CONST1.rotate_left(24),
-                CONST1.rotate_left(32),
-                CONST1.rotate_left(40),
-                CONST1.rotate_left(48),
-                CONST1.rotate_left(56),
-            ],
+            accumulator: 0,
             buffer: [42u8; 8],
             buffer_len: 0,
-            chunk_count: 0,
+            total_bytes: 0,
         }
     }
 
     pub fn new_with_seed(seed: u64) -> Self {
-        let base = seed ^ CONST1;
         Self {
-            accumulators: [
-                base,
-                base.rotate_left(8),
-                base.rotate_left(16),
-                base.rotate_left(24),
-                base.rotate_left(32),
-                base.rotate_left(40),
-                base.rotate_left(48),
-                base.rotate_left(56),
-            ],
+            accumulator: seed,
             buffer: [42u8; 8],
             buffer_len: 0,
-            chunk_count: 0,
+            total_bytes: 0,
         }
     }
 }
@@ -159,6 +139,7 @@ impl Hasher for JamHasher {
             return;
         }
 
+        self.total_bytes += len as u64;
         let mut offset = 0;
 
         // If we have buffered bytes, try to complete a full chunk
@@ -174,10 +155,7 @@ impl Hasher for JamHasher {
             // If we now have a full chunk, process it
             if self.buffer_len == 8 {
                 let chunk = u64::from_le_bytes(self.buffer);
-                let acc_idx = (self.chunk_count % 8) as usize;
-                self.accumulators[acc_idx] =
-                    fold_multiply(chunk ^ CONST1, self.accumulators[acc_idx] ^ CONST2);
-                self.chunk_count += 1;
+                self.accumulator ^= jamhash_u64(chunk);
                 self.buffer_len = 0;
                 self.buffer = [42u8; 8];
             }
@@ -186,30 +164,32 @@ impl Hasher for JamHasher {
         let remaining_bytes = &bytes[offset..];
         let (chunks, remainder) = remaining_bytes.as_chunks::<8>();
 
-        // Process chunks in groups of 8 for maximum parallelism
-        let num_full_groups = chunks.len() / 8;
+        // Process chunks - loop unrolling for better performance
+        let num_full_groups = chunks.len() / 4;
         let mut chunk_idx = 0;
 
         for _ in 0..num_full_groups {
-            // Process 8 chunks, one per accumulator
-            // The compiler can parallelize these since they're independent
-            for acc_idx in 0..8 {
-                let chunk = u64::from_le_bytes(chunks[chunk_idx]);
-                self.accumulators[acc_idx] =
-                    fold_multiply(chunk ^ CONST1, self.accumulators[acc_idx] ^ CONST2);
-                chunk_idx += 1;
-            }
-            self.chunk_count += 8;
+            // Process 4 chunks per iteration (unrolled)
+            // CPU can execute these jamhash_u64 calls in parallel
+            let chunk1 = u64::from_le_bytes(chunks[chunk_idx]);
+            let chunk2 = u64::from_le_bytes(chunks[chunk_idx + 1]);
+            let chunk3 = u64::from_le_bytes(chunks[chunk_idx + 2]);
+            let chunk4 = u64::from_le_bytes(chunks[chunk_idx + 3]);
+
+            let hash1 = jamhash_u64(chunk1);
+            let hash2 = jamhash_u64(chunk2);
+            let hash3 = jamhash_u64(chunk3);
+            let hash4 = jamhash_u64(chunk4);
+
+            self.accumulator ^= hash1 ^ hash2 ^ hash3 ^ hash4;
+            chunk_idx += 4;
         }
 
-        // Process remaining chunks (0-7)
+        // Process remaining chunks (0-3)
         while chunk_idx < chunks.len() {
             let chunk = u64::from_le_bytes(chunks[chunk_idx]);
-            let acc_idx = (self.chunk_count % 8) as usize;
-            self.accumulators[acc_idx] =
-                fold_multiply(chunk ^ CONST1, self.accumulators[acc_idx] ^ CONST2);
+            self.accumulator ^= jamhash_u64(chunk);
             chunk_idx += 1;
-            self.chunk_count += 1;
         }
 
         // Buffer any remaining bytes (< 8 bytes)
@@ -222,29 +202,16 @@ impl Hasher for JamHasher {
 
     #[inline]
     fn finish(&self) -> u64 {
-        // Process any remaining buffered bytes
-        let mut accumulators = self.accumulators;
+        let mut accumulator = self.accumulator;
 
+        // Process any remaining buffered bytes
         if self.buffer_len != 0 {
             let buffer_value = u64::from_le_bytes(self.buffer);
-            let acc_idx = (self.chunk_count % 8) as usize;
-            accumulators[acc_idx] =
-                fold_multiply(buffer_value ^ CONST1, accumulators[acc_idx] ^ CONST2);
+            accumulator ^= jamhash_u64(buffer_value);
         }
 
-        // Merge all 8 accumulators into a single hash
-        // Use a tree-reduction for better parallelism
-        let a = fold_multiply(accumulators[0], accumulators[1]);
-        let b = fold_multiply(accumulators[2], accumulators[3]);
-        let c = fold_multiply(accumulators[4], accumulators[5]);
-        let d = fold_multiply(accumulators[6], accumulators[7]);
-
-        let ab = fold_multiply(a, b);
-        let cd = fold_multiply(c, d);
-
-        let merged = fold_multiply(ab, cd);
-
-        jamhash_u64(merged)
+        // XOR in length and apply final jamhash_u64
+        jamhash_u64(accumulator ^ self.total_bytes)
     }
 }
 
