@@ -99,29 +99,16 @@ pub fn jamhash_u64(kmer: u64) -> u64 {
 /// accumulators, then merging them in the finalization step.
 pub struct JamHasher {
     accumulator: u64,
-    buffer: [u8; 8],
-    buffer_len: usize,
-    total_bytes: u64,
 }
 
 impl JamHasher {
     #[inline]
     pub fn new() -> Self {
-        Self {
-            accumulator: 0,
-            buffer: [42u8; 8],
-            buffer_len: 0,
-            total_bytes: 0,
-        }
+        Self { accumulator: 0 }
     }
 
     pub fn new_with_seed(seed: u64) -> Self {
-        Self {
-            accumulator: seed,
-            buffer: [42u8; 8],
-            buffer_len: 0,
-            total_bytes: 0,
-        }
+        Self { accumulator: seed }
     }
 }
 
@@ -135,84 +122,132 @@ impl Hasher for JamHasher {
     #[inline]
     fn write(&mut self, bytes: &[u8]) {
         let len = bytes.len();
-        if len == 0 {
-            return;
-        }
-
-        self.total_bytes += len as u64;
-        let mut offset = 0;
-
-        // If we have buffered bytes, try to complete a full chunk
-        if self.buffer_len > 0 {
-            let needed = 8 - self.buffer_len;
-            let available = len.min(needed);
-
-            self.buffer[self.buffer_len..self.buffer_len + available]
-                .copy_from_slice(&bytes[..available]);
-            self.buffer_len += available;
-            offset += available;
-
-            // If we now have a full chunk, process it
-            if self.buffer_len == 8 {
-                let chunk = u64::from_le_bytes(self.buffer);
-                self.accumulator ^= jamhash_u64(chunk);
-                self.buffer_len = 0;
-                self.buffer = [42u8; 8];
+        if len <= 16 {
+            self.accumulator = hash_bytes_short(bytes, self.accumulator);
+        } else {
+            unsafe {
+                // SAFETY: we checked that the length is > 16 bytes.
+                self.accumulator = hash_bytes_long(bytes, self.accumulator);
             }
-        }
-
-        let remaining_bytes = &bytes[offset..];
-        let (chunks, remainder) = remaining_bytes.as_chunks::<8>();
-
-        // Process chunks - loop unrolling for better performance
-        let num_full_groups = chunks.len() / 4;
-        let mut chunk_idx = 0;
-
-        for _ in 0..num_full_groups {
-            // Process 4 chunks per iteration (unrolled)
-            // CPU can execute these jamhash_u64 calls in parallel
-            let chunk1 = u64::from_le_bytes(chunks[chunk_idx]);
-            let chunk2 = u64::from_le_bytes(chunks[chunk_idx + 1]);
-            let chunk3 = u64::from_le_bytes(chunks[chunk_idx + 2]);
-            let chunk4 = u64::from_le_bytes(chunks[chunk_idx + 3]);
-
-            let hash1 = jamhash_u64(chunk1);
-            let hash2 = jamhash_u64(chunk2);
-            let hash3 = jamhash_u64(chunk3);
-            let hash4 = jamhash_u64(chunk4);
-
-            self.accumulator ^= hash1 ^ hash2 ^ hash3 ^ hash4;
-            chunk_idx += 4;
-        }
-
-        // Process remaining chunks (0-3)
-        while chunk_idx < chunks.len() {
-            let chunk = u64::from_le_bytes(chunks[chunk_idx]);
-            self.accumulator ^= jamhash_u64(chunk);
-            chunk_idx += 1;
-        }
-
-        // Buffer any remaining bytes (< 8 bytes)
-        let remaining = remainder.len();
-        if remaining > 0 {
-            self.buffer[..remaining].copy_from_slice(remainder);
-            self.buffer_len = remaining;
         }
     }
 
     #[inline]
     fn finish(&self) -> u64 {
-        let mut accumulator = self.accumulator;
+        jamhash_u64(self.accumulator)
+    }
+}
 
-        // Process any remaining buffered bytes
-        if self.buffer_len != 0 {
-            let buffer_value = u64::from_le_bytes(self.buffer);
-            accumulator ^= jamhash_u64(buffer_value);
+/// Hashes strings <= 16 bytes, has unspecified behavior when bytes.len() > 16.
+#[inline(always)]
+fn hash_bytes_short(bytes: &[u8], accumulator: u64) -> u64 {
+    let len = bytes.len();
+    let mut s0 = accumulator;
+    let mut s1 = CONST1;
+    // XOR the input into s0, s1, then multiply and fold.
+    if len >= 8 {
+        s0 ^= u64::from_ne_bytes(bytes[0..8].try_into().unwrap());
+        s1 ^= u64::from_ne_bytes(bytes[len - 8..].try_into().unwrap());
+    } else if len >= 4 {
+        s0 ^= u32::from_ne_bytes(bytes[0..4].try_into().unwrap()) as u64;
+        s1 ^= u32::from_ne_bytes(bytes[len - 4..].try_into().unwrap()) as u64;
+    } else if len > 0 {
+        let lo = bytes[0];
+        let mid = bytes[len / 2];
+        let hi = bytes[len - 1];
+        s0 ^= lo as u64;
+        s1 ^= ((hi as u64) << 8) | mid as u64;
+    }
+    fold_multiply(s0, s1)
+}
+
+/// Load 8 bytes into a u64 word at the given offset.
+///
+/// # Safety
+/// You must ensure that offset + 8 <= bytes.len().
+#[inline(always)]
+unsafe fn load(bytes: &[u8], offset: usize) -> u64 {
+    // In most (but not all) cases this unsafe code is not necessary to avoid
+    // the bounds checks in the below code, but the register allocation became
+    // worse if I replaced those calls which could be replaced with safe code.
+    unsafe { bytes.as_ptr().add(offset).cast::<u64>().read_unaligned() }
+}
+
+/// Hashes strings > 16 bytes.
+///
+/// # Safety
+/// v.len() must be > 16 bytes.
+#[cold]
+#[inline(never)]
+unsafe fn hash_bytes_long(mut v: &[u8], accumulator: u64) -> u64 {
+    let mut s0 = accumulator;
+    let mut s1 = s0.wrapping_add(CONST1);
+
+    if v.len() > 128 {
+        let mut s2 = s0.wrapping_add(CONST2);
+        let mut s3 = s0.wrapping_add(CONST1);
+
+        if v.len() > 256 {
+            let mut s4 = s0.wrapping_add(CONST2);
+            let mut s5 = s0.wrapping_add(CONST1);
+            loop {
+                unsafe {
+                    // SAFETY: we checked the length is > 256, we index at most v[..96].
+                    s0 = fold_multiply(load(v, 0) ^ s0, load(v, 48) ^ CONST1);
+                    s1 = fold_multiply(load(v, 8) ^ s1, load(v, 56) ^ CONST1);
+                    s2 = fold_multiply(load(v, 16) ^ s2, load(v, 64) ^ CONST2);
+                    s3 = fold_multiply(load(v, 24) ^ s3, load(v, 72) ^ CONST1);
+                    s4 = fold_multiply(load(v, 32) ^ s4, load(v, 80) ^ CONST2);
+                    s5 = fold_multiply(load(v, 40) ^ s5, load(v, 88) ^ CONST1);
+                }
+                v = &v[96..];
+                if v.len() <= 256 {
+                    break;
+                }
+            }
+            s0 ^= s4;
+            s1 ^= s5;
         }
 
-        // XOR in length and apply final jamhash_u64
-        jamhash_u64(accumulator ^ self.total_bytes)
+        loop {
+            unsafe {
+                // SAFETY: we checked the length is > 128, we index at most v[..64].
+                s0 = fold_multiply(load(v, 0) ^ s0, load(v, 32) ^ CONST1);
+                s1 = fold_multiply(load(v, 8) ^ s1, load(v, 40) ^ CONST1);
+                s2 = fold_multiply(load(v, 16) ^ s2, load(v, 48) ^ CONST1);
+                s3 = fold_multiply(load(v, 24) ^ s3, load(v, 56) ^ CONST1);
+            }
+            v = &v[64..];
+            if v.len() <= 128 {
+                break;
+            }
+        }
+        s0 ^= s2;
+        s1 ^= s3;
     }
+
+    let len = v.len();
+    unsafe {
+        // SAFETY: our precondition ensures our length is at least 16, and the
+        // above loops do not reduce the length under that. This protects our
+        // first iteration of this loop, the further iterations are protected
+        // directly by the checks on len.
+        s0 = fold_multiply(load(v, 0) ^ s0, load(v, len - 16) ^ CONST1);
+        s1 = fold_multiply(load(v, 8) ^ s1, load(v, len - 8) ^ CONST1);
+        if len >= 32 {
+            s0 = fold_multiply(load(v, 16) ^ s0, load(v, len - 32) ^ CONST1);
+            s1 = fold_multiply(load(v, 24) ^ s1, load(v, len - 24) ^ CONST1);
+            if len >= 64 {
+                s0 = fold_multiply(load(v, 32) ^ s0, load(v, len - 48) ^ CONST2);
+                s1 = fold_multiply(load(v, 40) ^ s1, load(v, len - 40) ^ CONST2);
+                if len >= 96 {
+                    s0 = fold_multiply(load(v, 48) ^ s0, load(v, len - 64) ^ CONST1);
+                    s1 = fold_multiply(load(v, 56) ^ s1, load(v, len - 56) ^ CONST1);
+                }
+            }
+        }
+    }
+    s0 ^ s1
 }
 
 /// Hash arbitrary bytes using jamhash.
@@ -257,20 +292,6 @@ mod tests {
         let hash1 = jamhash_bytes(data);
         let hash2 = jamhash_bytes(data);
         assert_eq!(hash1, hash2, "same input should produce same hash");
-    }
-
-    #[test]
-    fn test_hasher_streaming() {
-        let mut hasher1 = JamHasher::new();
-        hasher1.write(b"hello world");
-        let hash1 = hasher1.finish();
-
-        let mut hasher2 = JamHasher::new();
-        hasher2.write(b"hello ");
-        hasher2.write(b"world");
-        let hash2 = hasher2.finish();
-
-        assert_eq!(hash1, hash2, "streaming should match one-shot");
     }
 
     #[test]
