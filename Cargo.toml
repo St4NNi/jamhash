@@ -7,18 +7,17 @@ description = "A fast, simple hash function with dual-path accumulation"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/yourusername/jamhash"
 keywords = ["hash", "hashing", "hasher", "kmer"]
-categories = ["algorithms", "hashing", "minhash"]
+categories = ["algorithms"]
 
 [dependencies]
 
 [dev-dependencies]
-criterion = { version = "0.7.0", features = ["html_reports"] }
-murmurhash3 = { version = "0.0.5" }
+criterion = { version = "0.8.1", features = ["html_reports"] }
+murmurhash3 = "0.0.5"
 fastmurmur3 = "0.2.0"
 xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
-roaring = "0.11.2"
-rand = "0.9.2"
 foldhash = "0.2.0"
+
 
 [lib]
 name = "jamhash"

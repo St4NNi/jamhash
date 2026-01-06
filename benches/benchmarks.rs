@@ -1,4 +1,4 @@
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use std::{hash::BuildHasher, hint::black_box, time::Duration};
 
 #[inline]
@@ -35,7 +35,7 @@ fn bench_hash_functions(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(2));
 
     // Pre-generate enough values for the benchmark
-    let mut values = (0..100000u64).into_iter().cycle();
+    let mut values = (0..100000u64).cycle();
 
     group.bench_function("xxhash3", |b| {
         b.iter(|| xxhash3(black_box(values.next().unwrap())))
@@ -60,5 +60,39 @@ fn bench_hash_functions(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_hash_functions);
+fn bench_bytes_hashing(c: &mut Criterion) {
+    use std::hash::Hasher;
+
+    // Test various sizes: short (≤16), medium (17-128), long (>128), ultra-long (>4KB)
+    let sizes = [4, 8, 16, 32, 64, 128, 256, 1024, 4096, 8192, 16384];
+
+    for &size in &sizes {
+        let data: Vec<u8> = (0..size).map(|i| i as u8).collect();
+
+        let mut group = c.benchmark_group(format!("bytes_{}", size));
+        group.throughput(Throughput::Bytes(size as u64));
+        group.warm_up_time(Duration::from_millis(300));
+        group.measurement_time(Duration::from_secs(2));
+
+        group.bench_function("jamhash", |b| {
+            b.iter(|| jamhash::jamhash_bytes(black_box(&data)))
+        });
+
+        group.bench_function("xxhash3", |b| {
+            b.iter(|| xxhash_rust::xxh3::xxh3_64(black_box(&data)))
+        });
+
+        group.bench_function("foldhash", |b| {
+            b.iter(|| {
+                let mut hasher = foldhash::quality::RandomState::default().build_hasher();
+                hasher.write(black_box(&data));
+                hasher.finish()
+            })
+        });
+
+        group.finish();
+    }
+}
+
+criterion_group!(benches, bench_hash_functions, bench_bytes_hashing);
 criterion_main!(benches);

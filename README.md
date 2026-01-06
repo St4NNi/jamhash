@@ -5,9 +5,9 @@ A fast, non-cryptographic hash function designed for genomics and general-purpos
 ## Features
 
 - **`jamhash_u64`**: Optimized for hashing genomic k-mers encoded as u64 (2-bit encoding)
-- **`JamHasher`**: Streaming hasher implementing `std::hash::Hasher` trait
+- **`jamhash_bytes`**: Size-optimized byte hashing with paths for short (≤16), medium (17-128), long (129-4095), and ultra-long (≥4KB) inputs
+- **`JamHasher`**: Streaming hasher implementing `std::hash::Hasher`
 - **Dual-path accumulation**: Strong avalanche properties with minimal overhead
-- **Predictable**: `hash(0) == 0` for consistent behavior
 - **Tested**: Low collision rates with canonical k-mers up to k=21
 
 ## Genomics Use Cases
@@ -35,7 +35,7 @@ use std::hash::Hasher;
 // Hash arbitrary bytes
 let hash = jamhash_bytes(b"hello world");
 
-// Streaming hasher
+// Streaming std::hash::Hasher implementation
 let mut hasher = JamHasher::new();
 hasher.write(b"hello ");
 hasher.write(b"world");
@@ -54,9 +54,9 @@ jamhash = "0.1"
 ## Inspirations
 
 jamhash draws inspiration from:
-- [rapidhash](https://github.com/Nicoshev/rapidhash) - Fast hashing with folded multiply
-- [foldhash](https://github.com/orlp/foldhash) - Efficient folding techniques
-- [ahash](https://github.com/tkaitchuck/aHash) - High-quality non-cryptographic hashing
+- [rapidhash](https://github.com/Nicoshev/rapidhash)
+- [foldhash](https://github.com/orlp/foldhash)
+- [ahash](https://github.com/tkaitchuck/aHash)
 
 ## License
 
