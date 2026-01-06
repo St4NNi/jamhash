@@ -1,6 +1,6 @@
 [package]
 name = "jamhash"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 authors = ["Sebastian Beyvers"]
 description = "A fast, simple hash function with dual-path accumulation"
