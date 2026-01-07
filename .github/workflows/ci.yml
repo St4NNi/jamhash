@@ -19,7 +19,9 @@ jobs:
       - name: Run tests
         run: cargo test --verbose
       - name: Install nightly
-        run: rustup toolchain install nightly --component rustfmt clippy
+        run: rustup toolchain install nightly
+      - name: Install clippy and fmt
+        run: rustup component add clippy --toolchain nightly && rustup component add rustfmt --toolchain nightly
       - name: Run clippy
         run: cargo +nightly clippy -- -D warnings
       - name: Check formatting
