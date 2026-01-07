@@ -61,14 +61,24 @@ fn fold_multiply(input: u64, const_1: u64) -> u64 {
 }
 
 /// Fast unaligned u64 read
+///
+/// # Safety
+/// Caller must ensure `ptr` points to at least 8 readable bytes.
 #[inline(always)]
 unsafe fn read_u64(ptr: *const u8) -> u64 {
+    // SAFETY: Caller guarantees ptr points to at least 8 valid bytes.
+    // read_unaligned handles any alignment.
     unsafe { ptr.cast::<u64>().read_unaligned() }
 }
 
 /// Fast unaligned u32 read
+///
+/// # Safety
+/// Caller must ensure `ptr` points to at least 4 readable bytes.
 #[inline(always)]
 unsafe fn read_u32(ptr: *const u8) -> u64 {
+    // SAFETY: Caller guarantees ptr points to at least 4 valid bytes.
+    // read_unaligned handles any alignment.
     unsafe { ptr.cast::<u32>().read_unaligned() as u64 }
 }
 
@@ -116,20 +126,6 @@ fn rapidmix(v: u64, k: u64) -> u64 {
     m ^ (m >> 47)
 }
 
-// Precomputed constants for unseeded path (seed=0)
-const SEED0_S: u64 = CONST4; // 0 + CONST4
-const SEED0_S17: u64 = CONST4.rotate_left(17);
-const SEED0_S41: u64 = CONST4.rotate_left(41);
-
-/// Fast unseeded hash - specialized for seed=0 case
-#[inline(always)]
-fn jamhash_unseeded(value: u64) -> u64 {
-    let v = value ^ CONST5;
-    // Precomputed seed mixing
-    let mixed = rapidmix(v ^ SEED0_S, CONST1) ^ rapidmix(v.rotate_left(32) ^ SEED0_S17, CONST2);
-    fold_multiply(mixed ^ SEED0_S41, CONST3)
-}
-
 /// Hash for bytes with integrated seed mixing - 2 rapidmix + 1 fold_multiply
 #[inline(always)]
 fn jamhash_seeded(value: u64, seed: u64) -> u64 {
@@ -143,57 +139,23 @@ fn jamhash_seeded(value: u64, seed: u64) -> u64 {
     fold_multiply(mixed ^ s.rotate_left(41), CONST3)
 }
 
-/// Hash short byte sequences (≤16 bytes) - unseeded fast path
-#[inline(always)]
-fn jam_short_unseeded(bytes: &[u8]) -> u64 {
-    let len = bytes.len();
-    let ptr = bytes.as_ptr();
-
-    unsafe {
-        match len {
-            0 => jamhash_unseeded(0),
-            1..=3 => {
-                // Pack bytes with wide separation following wyhash pattern
-                let combined = ((bytes[0] as u64) << 16)
-                    | ((bytes[len >> 1] as u64) << 8)
-                    | (bytes[len - 1] as u64);
-                // Protected multiply pattern - prevents bias propagation
-                // Using two fold_multiply rounds for better avalanche
-                let a = fold_multiply(combined ^ CONST5, CONST1 ^ (len as u64));
-                fold_multiply(a ^ CONST6, CONST2)
-            }
-            4..=7 => {
-                let lo = read_u32(ptr);
-                let hi = read_u32(ptr.add(len - 4));
-                // XOR with constants to break overlap correlation for 4-6 byte inputs
-                let a = fold_multiply(lo ^ CONST5, CONST1);
-                let b = fold_multiply(hi ^ CONST6, CONST2);
-                fold_multiply(a ^ b, CONST3 ^ (len as u64))
-            }
-            8 => jamhash_unseeded(read_u64(ptr)),
-            9..=16 => {
-                let lo = read_u64(ptr);
-                let hi = read_u64(ptr.add(len - 8));
-                // Two independent fold_multiply paths for better mixing
-                let a = fold_multiply(lo ^ CONST5, CONST1);
-                let b = fold_multiply(hi ^ CONST6, CONST2);
-                fold_multiply(
-                    a ^ b ^ lo.rotate_left(23) ^ hi.rotate_left(47),
-                    CONST3 ^ (len as u64),
-                )
-            }
-            _ => unreachable!(),
-        }
-    }
-}
-
-/// Hash short byte sequences (≤16 bytes) - seeded path
+/// Hash short byte sequences (≤16 bytes) with seed mixing.
+///
+/// This function is designed for streaming use (JamHasher) where the seed
+/// represents accumulated state from previous writes. For single-shot hashing,
+/// use `jamhash_bytes` which has optimized paths for each size range.
 #[inline(always)]
 fn jam_short(bytes: &[u8], seed: u64) -> u64 {
     let len = bytes.len();
     let ptr = bytes.as_ptr();
     let s = seed.wrapping_add(CONST4);
 
+    // SAFETY: All pointer reads are bounds-checked by the match arms:
+    // - 0 bytes: no pointer reads
+    // - 1-3 bytes: direct slice indexing (safe), no pointer arithmetic
+    // - 4-7 bytes: read_u32 at ptr (4 bytes) and ptr+len-4 (4 bytes), both valid since len >= 4
+    // - 8 bytes: read_u64 at ptr (8 bytes), valid since len == 8
+    // - 9-16 bytes: read_u64 at ptr (8 bytes) and ptr+len-8 (8 bytes), both valid since len >= 9
     unsafe {
         match len {
             0 => jamhash_seeded(0, seed),
@@ -244,6 +206,9 @@ fn jam_medium(bytes: &[u8], seed: u64) -> u64 {
     let mut acc0 = s ^ CONST1;
     let mut acc1 = s.rotate_left(33) ^ CONST2;
 
+    // SAFETY: This function is only called when len is in [17, 128].
+    // - Main loop: reads at ptr+i and ptr+i+8 where i+16 <= len, so both reads are valid
+    // - Tail: reads at ptr+len-16 and ptr+len-8, valid since len >= 17 > 16
     unsafe {
         let mut i = 0;
         // Process 16-byte chunks with 2 fold_multiply per chunk
@@ -288,6 +253,10 @@ fn jam_long(bytes: &[u8], seed: u64) -> u64 {
     let mut s2 = s.rotate_left(33) ^ CONST3;
     let mut s3 = s.rotate_left(49) ^ CONST4;
 
+    // SAFETY: This function is only called when len is in [129, 4095].
+    // - 64-byte loop: reads up to ptr+i+56 where i < len-63, so max read is at ptr+len-8
+    // - 32-byte chunk: reads up to ptr+i+24 where i < len-(len%32), ensuring bounds
+    // - Tail: reads at ptr+len-32 through ptr+len-8, all valid since len >= 129 > 32
     unsafe {
         let mut i = 0;
         let end64 = len.saturating_sub(63);
@@ -355,6 +324,9 @@ fn jam_ultra_long(bytes: &[u8], seed: u64) -> u64 {
     let mut a6 = s.rotate_left(49) ^ CONST1;
     let mut a7 = s.rotate_left(57) ^ CONST2;
 
+    // SAFETY: This function is only called when len >= 4096.
+    // - Main loop: reads at ptr+i through ptr+i+56 where i < len-(len%64), all in bounds
+    // - Tail: reads 64 bytes starting at ptr+len-64, valid since len >= 4096 > 64
     unsafe {
         let mut i = 0;
         let end = len - (len % 64);
@@ -455,8 +427,9 @@ impl Hasher for JamHasher {
 
 /// Hash arbitrary bytes using jamhash.
 ///
-/// Uses size-optimized paths for different input lengths
-/// and finalizes with jamhash_u64.
+/// Uses size-optimized paths: inputs ≤8 bytes go directly through
+/// jamhash_u64 for maximum speed, larger inputs use streaming paths
+/// with jamhash_u64 finalization.
 ///
 /// # Example
 ///
@@ -465,15 +438,40 @@ impl Hasher for JamHasher {
 ///
 /// let hash = jamhash_bytes(b"hello world");
 /// assert_ne!(hash, 0);
-///
 /// ```
 #[inline]
 pub fn jamhash_bytes(bytes: &[u8]) -> u64 {
-    // Use specialized unseeded paths for common case
-    match bytes.len() {
-        0..=16 => jam_short_unseeded(bytes),
-        17..=128 => jam_medium(bytes, 0),
-        _ => jam_long(bytes, 0),
+    let len = bytes.len();
+    let ptr = bytes.as_ptr();
+
+    match len {
+        0 => 0,
+        1..=3 => {
+            // Pack bytes with length differentiation via multiply
+            let packed = ((bytes[0] as u64) << 16)
+                | ((bytes[len >> 1] as u64) << 8)
+                | (bytes[len - 1] as u64);
+            jamhash_u64(packed ^ (len as u64).wrapping_mul(CONST5))
+        }
+        4..=7 => {
+            // SAFETY: len in [4,7], read_u32 at ptr and ptr+len-4 are both valid
+            let packed = unsafe { read_u32(ptr) | (read_u32(ptr.add(len - 4)) << 32) };
+            jamhash_u64(packed ^ (len as u64).wrapping_mul(CONST5))
+        }
+        8 => {
+            // SAFETY: len == 8, read_u64 is valid
+            jamhash_u64(unsafe { read_u64(ptr) } ^ (8u64).wrapping_mul(CONST5))
+        }
+        9..=16 => {
+            // SAFETY: len in [9,16], both read_u64 calls are valid
+            let (lo, hi) = unsafe { (read_u64(ptr), read_u64(ptr.add(len - 8))) };
+            // XOR with constants before multiply to avoid zero-multiplication degeneracy
+            let temp = ((lo ^ CONST1) as u128).wrapping_mul((hi ^ CONST2) as u128);
+            let mixed = (temp as u64) ^ ((temp >> 64) as u64);
+            jamhash_u64(mixed ^ (len as u64).wrapping_mul(CONST5))
+        }
+        17..=128 => jamhash_u64(jam_medium(bytes, 0)),
+        _ => jamhash_u64(jam_long(bytes, 0)),
     }
 }
 

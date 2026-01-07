@@ -51,6 +51,16 @@ Add to your `Cargo.toml`:
 jamhash = "0.1"
 ```
 
+## Quality Verification
+
+jamhash passes all 188 tests in [SMHasher3](https://gitlab.com/fwojcik/smhasher3), the comprehensive hash function test suite:
+
+```
+Overall result: pass (188 / 188 passed)
+```
+
+Full test results are available in [smhasher3_jamhash.txt](smhasher3_jamhash.txt).
+
 ## Inspirations
 
 jamhash draws inspiration from:

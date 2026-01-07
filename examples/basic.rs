@@ -26,11 +26,11 @@ fn main() {
     );
     println!();
 
-    // Example 3: Streaming hasher
-    println!("3. Streaming hasher (same result as one-shot):");
+    // Example 3: Streaming hasher (std::hash::Hasher interface)
+    // jamhash_bytes and JamHasher produce the same result for single writes
+    println!("3. Streaming hasher:");
     let mut hasher = JamHasher::new();
-    hasher.write(b"hello ");
-    hasher.write(b"world");
+    hasher.write(b"hello world");
     let hash_streaming = hasher.finish();
     println!("   Streaming hash = 0x{:016x}", hash_streaming);
     println!("   Matches one-shot: {}", hash == hash_streaming);
