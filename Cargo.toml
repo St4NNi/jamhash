@@ -5,7 +5,7 @@ edition = "2024"
 authors = ["Sebastian Beyvers"]
 description = "A fast, simple hash function with dual-path accumulation"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/yourusername/jamhash"
+repository = "https://github.com/St4NNi/jamhash"
 keywords = ["hash", "hashing", "hasher", "kmer"]
 categories = ["algorithms"]
 

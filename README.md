@@ -1,3 +1,7 @@
+[![Crates.io](https://img.shields.io/crates/v/jamhash.svg)](https://crates.io/crates/jamhash)
+[![Documentation](https://docs.rs/jamhash/badge.svg)](https://docs.rs/jamhash)
+[![License](https://img.shields.io/crates/l/jamhash.svg)](https://github.com/St4NNi/jamhash#license)
+
 # jamhash
 
 A fast, non-cryptographic hash function designed for genomics and general-purpose hashing.
@@ -70,4 +74,9 @@ jamhash draws inspiration from:
 
 ## License
 
-MIT OR Apache-2.0
+Licensed under either of:
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
+
+at your option.
